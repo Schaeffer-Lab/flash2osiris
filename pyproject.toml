@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flash2osiris"
+version = "0.1.0"
+description = "Convert FLASH MHD output into initialized OSIRIS PIC input decks"
+requires-python = ">=3.10"
+# Heavy runtime deps (yt, jinja2, plasmapy, astropy, matplotlib) come from
+# environment.yml; listed here for reference / editable installs.
+dependencies = ["numpy", "scipy", "pyyaml"]
+
+[tool.setuptools]
+packages = ["flash_osiris"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

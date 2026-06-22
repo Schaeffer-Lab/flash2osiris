@@ -1,0 +1,61 @@
+# Python-init 2D OSIRIS run spec.
+#   python FLASH_OSIRIS_define.py --config ../runs/perlmutter_2d.run.yaml
+#
+# Differences from the 1D spec:
+#   * geometry is a BOX in c/omega_pe (xmin/xmax/ymin/ymax), not a lineout.
+#   * node_number takes TWO values: the (x, y) MPI/GPU decomposition.
+#     [4, 4] -> 16 ranks = 16 GPUs = 4 Perlmutter nodes.
+#   * ppc is PER DIMENSION, so particles/cell = ppc^2 -- keep it small (3 here).
+#   * the transverse direction x is PERIODIC by default in 2D; emf_boundary /
+#     part_boundary (lower, upper) apply to the y direction only.
+#
+# Box: the FLASH domain in c/wpe is x in [-3569, 3569], y in [-413, 6725] (n0 = 5e18).
+# The 1D lineout region was x=0, y in [294.5, 2945]; this box covers that shock region
+# with transverse extent in x. With dx=1.0: nx=4000, ny=2700 (both divisible by 4).
+
+data_path: /pscratch/sd/d/dschnei/FLASH_3D_noshield/MagShockZ_hdf5_plt_cnt_0009
+dim: 2
+inputfile_name: magshockz_rqm100_dx1.0_ppc3_g20
+reference_density: 5.0e18
+rqm_factor: 100
+dx: 1.0
+ppc: 3
+tmax_gyroperiods: 20
+algorithm: cuda
+node_number: [4, 4]
+num_threads: 1
+n_dump_total: 512
+restart: false
+
+charge_states: {al: 13, si: 14}
+
+# 2D box in c/omega_pe.
+geometry:
+  xmin: -2000
+  xmax: 2000
+  ymin: 300
+  ymax: 3000
+
+solver:
+  vpml_bnd_size: 100
+  emf_boundary: [pmc, vpml]
+  part_boundary: [thermal, thermal]
+  interpolation: cubic
+  smooth_type: binomial
+  smooth_order: 2
+
+diagnostics:
+  n_ave: 6
+  emf_reports: [b1, b2, b3, e1, e2, e3]
+  reports: [charge, j1, j2, j3, q1, q2, q3]
+  rep_udist: [uth1, uth2, ufl1, ufl2]
+  phasespaces: [p1x1, p2x1, p3x1, gx1]
+  e_ps_pmin: [-1, -1, -0.5]
+  e_ps_pmax: [1, 1, 0.5]
+  i_ps_pmin: [-0.1, -0.1, -0.05]
+  i_ps_pmax: [0.1, 0.1, 0.05]
+  ps_np: [4096, 4096, 4096]
+  ps_ngamma: 128
+  ps_gammamax: 3.0
+  ps_nx: 1024
+  ps_ny: 512

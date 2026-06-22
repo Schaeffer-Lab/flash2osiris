@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# Generator outputs
+input_files/
+*.npy
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

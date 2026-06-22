@@ -1,0 +1,55 @@
+# Example run spec for a DIFFERENT ion mix (carbon + hydrogen) -- demonstrates that
+# switching ion species needs nothing but editing the `charge_states` keys below.
+# Both elements are already in MOLAR_WEIGHTS (yt_plugin.py); the generator derives the
+# species mask, per-species densities, thermal velocities and rqm from FLASH for you.
+#
+# Generate with:
+#   conda activate flash2osiris
+#   python -m flash_osiris.generator --config examples/example_carbon_hydrogen.run.yaml
+
+data_path: /path/to/your/FLASH_hdf5_plt_cnt_XXXX   # <-- point at your FLASH dump
+dim: 1
+inputfile_name: example_ch_1d
+reference_density: 5.0e18      # cm^-3 (dot required so YAML parses as float)
+rqm_factor: 100
+dx: 0.1                         # c/omega_pe
+ppc: 500
+tmax_gyroperiods: 80
+algorithm: cuda
+node_number: [4]
+num_threads: 1
+n_dump_total: 512
+restart: false
+
+# Ion species = the keys here (carbon, hydrogen). The values are the physical charge
+# states, carried through to analysis. The lighter ion (H) gets species mask 1.
+charge_states: {c: 6, h: 1}
+
+# 1D lineout endpoints in cm (x y z of the z-midplane).
+geometry:
+  start_point: [0, 0.07, 0]
+  end_point: [0, 0.70, 0]
+
+solver:
+  vpml_bnd_size: 100
+  emf_boundary: [pmc, vpml]
+  part_boundary: [thermal, thermal]
+  interpolation: cubic
+  smooth_type: binomial
+  smooth_order: 2
+
+diagnostics:
+  n_ave: 6
+  emf_reports: [b1, b2, b3, e1, e2, e3]
+  reports: [charge, j1, j2, j3, q1, q2, q3]
+  rep_udist: [uth1, uth2, ufl1, ufl2]
+  phasespaces: [p1x1, p2x1, p3x1, gx1]
+  e_ps_pmin: [-1, -1, -0.5]
+  e_ps_pmax: [1, 1, 0.5]
+  i_ps_pmin: [-0.1, -0.1, -0.05]
+  i_ps_pmax: [0.1, 0.1, 0.05]
+  ps_np: [4096, 4096, 4096]
+  ps_ngamma: 128
+  ps_gammamax: 3.0
+  ps_nx: 1024
+  ps_ny: 512

@@ -1,0 +1,158 @@
+'''
+OSIRIS python-init script (FLASH -> OSIRIS).  One code path serves 1D and 2D:
+the SAME interp/*.npy slices (the FLASH x-y midplane in c/omega_pe) are read in
+both cases.  A 2D run samples the whole plane; a 1D run samples a lineout through
+it at angle theta.
+
+Conventions (must stay self-consistent with init_python/FLASH_OSIRIS_define.py,
+which builds every grid as data[i_x, i_y] over (FLASH_x, FLASH_y)):
+  * interpolators are ALWAYS evaluated in (x_flash, y_flash) order;
+  * OSIRIS sim coords (xi1, xi2) map to FLASH coords by an affine
+    rotation+translation  FLASH = origin + R(theta) . (xi1, xi2);
+  * in-plane vector fields (B, E, v) are rotated FLASH->OSIRIS by R(-theta);
+    out-of-plane (x3) and scalar quantities (densities, thermal speeds) are not.
+For 2D, theta = 0 and origin = (0,0), so the map and rotation are the identity.
+
+Template parameters: dims, start_point, theta, distance, box_bounds, species_list.
+'''
+
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+
+dims = {{ dims }}
+{% if dims == 1 %}
+theta  = {{ theta }}            # lineout angle in the FLASH x-y plane [rad]
+origin = {{ start_point }}      # FLASH (x, y) [c/wpe] at lineout arc-length 0
+distance = {{ distance }}       # lineout length [c/wpe]
+{% else %}
+theta  = 0.0                    # 2D box is axis-aligned with the FLASH x-y plane
+origin = [0.0, 0.0]
+{% endif %}
+
+# FLASH x-y extents [c/wpe] of the saved slices (used to rebuild interpolators).
+box_bounds = {
+    "xmin": {{ box_bounds["xmin"] }}, "xmax": {{ box_bounds["xmax"] }},
+    "ymin": {{ box_bounds["ymin"] }}, "ymax": {{ box_bounds["ymax"] }},
+}
+
+_C, _S = np.cos(theta), np.sin(theta)
+_interp_cache = {}
+
+#-----------------------------------------------------------------------------------------
+# Helpers
+#-----------------------------------------------------------------------------------------
+def _interp(name):
+    """Linear interpolator over the FLASH plane for interp/<name>.npy, built on
+    first use.  Rebuilding from the raw array (rather than unpickling a scipy
+    object) keeps this robust across scipy versions."""
+    if name not in _interp_cache:
+        g = np.load(f"interp/{name}.npy")
+        _interp_cache[name] = RegularGridInterpolator(
+            (np.linspace(box_bounds["xmin"], box_bounds["xmax"], g.shape[0]),
+             np.linspace(box_bounds["ymin"], box_bounds["ymax"], g.shape[1])),
+            g, method="linear", bounds_error=True, fill_value=0.0)
+    return _interp_cache[name]
+
+
+def _flash_xy(xi1, xi2):
+    """OSIRIS sim coords (xi1, xi2) -> FLASH (x, y): origin + R(theta).(xi1, xi2)."""
+    return (origin[0] + _C * xi1 - _S * xi2,
+            origin[1] + _S * xi1 + _C * xi2)
+
+
+def _rotate(Vx, Vy):
+    """In-plane FLASH vector (Vx, Vy) -> OSIRIS (V1, V2) = R(-theta).(Vx, Vy)."""
+    return (_C * Vx + _S * Vy, -_S * Vx + _C * Vy)
+
+
+def _grid_xy(STATE):
+    """FLASH (x, y) for every point of a field grid STATE['data'].
+    OSIRIS exposes the array Fortran-reversed: data[i_x2, i_x1]."""
+    x_bnd, shp = STATE["x_bnd"], STATE["data"].shape
+    if dims == 1:
+        s = np.linspace(x_bnd[0, 0], x_bnd[0, 1], shp[0], endpoint=True)
+        return _flash_xy(s, 0.0)
+    x1 = np.linspace(x_bnd[0, 0], x_bnd[0, 1], shp[1], endpoint=True)
+    x2 = np.linspace(x_bnd[1, 0], x_bnd[1, 1], shp[0], endpoint=True)
+    X1, X2 = np.meshgrid(x1, x2, indexing="xy")
+    return _flash_xy(X1, X2)
+
+
+def _part_xy(STATE):
+    """FLASH (x, y) for each particle position in STATE['x']."""
+    xi1 = STATE["x"][:, 0]
+    xi2 = STATE["x"][:, 1] if dims == 2 else 0.0
+    return _flash_xy(xi1, xi2)
+
+#-----------------------------------------------------------------------------------------
+# Fields  (one function for all components, dispatched by STATE['fld'])
+#-----------------------------------------------------------------------------------------
+# OSIRIS component -> (FLASH field a, FLASH field b, rotated-component index)
+_FIELD_SRC = {
+    "b1": ("magx", "magy", 0), "b2": ("magx", "magy", 1), "b3": ("magz", None, None),
+    "e1": ("Ex",   "Ey",   0), "e2": ("Ex",   "Ey",   1), "e3": ("Ez",   None, None),
+}
+
+def set_fld_int(STATE):
+    pts = _grid_xy(STATE)
+    fa, fb, comp = _FIELD_SRC[STATE["fld"]]
+    if fb is None:                                  # out-of-plane: no rotation
+        STATE["data"] = _interp(fa)(pts)
+    else:                                           # in-plane: rotate (Vx, Vy)
+        STATE["data"] = _rotate(_interp(fa)(pts), _interp(fb)(pts))[comp]
+
+#-----------------------------------------------------------------------------------------
+# Thermal velocities  (isotropic scalar speed -> same in all 3 components)
+#-----------------------------------------------------------------------------------------
+def _set_uth(STATE, vth_name):
+    vth = _interp(vth_name)(_part_xy(STATE))
+    u = np.empty((STATE["x"].shape[0], 3))
+    u[:, 0] = u[:, 1] = u[:, 2] = vth
+    STATE["u"] = u
+
+def set_uth_e(STATE):
+    _set_uth(STATE, "vthele")
+{% for ion in species_list %}
+def set_uth_{{ ion }}(STATE):
+    _set_uth(STATE, "vth{{ ion }}")
+{% endfor %}
+#-----------------------------------------------------------------------------------------
+# Fluid velocities  (in-plane components rotated; x3 left as-is)
+#-----------------------------------------------------------------------------------------
+def _set_ufl(STATE, fx, fy, fz):
+    pts = _part_xy(STATE)
+    v1, v2 = _rotate(_interp(fx)(pts), _interp(fy)(pts))
+    u = np.empty((STATE["x"].shape[0], 3))
+    u[:, 0], u[:, 1], u[:, 2] = v1, v2, _interp(fz)(pts)
+    STATE["u"] = u
+
+def set_ufl_e(STATE):
+    _set_ufl(STATE, "v_ex", "v_ey", "v_ez")
+
+def set_ufl_i(STATE):
+    _set_ufl(STATE, "v_ix", "v_iy", "v_iz")
+
+#-----------------------------------------------------------------------------------------
+# Densities  (OSIRIS' own interpolator samples the grid we put in STATE['data'])
+#-----------------------------------------------------------------------------------------
+def _set_density(STATE, name):
+    if dims == 1:
+        n = 4096
+        STATE["nx"]   = np.array([n])
+        STATE["xmin"] = np.array([0.0])
+        STATE["xmax"] = np.array([distance])
+        xf, yf = _flash_xy(np.linspace(0.0, distance, n, endpoint=True), 0.0)
+        STATE["data"] = _interp(name)((xf, yf))
+    else:
+        g = np.load(f"interp/{name}.npy")           # (i_x, i_y)
+        STATE["data"] = g.T                          # OSIRIS wants [i_x2, i_x1]
+        STATE["nx"]   = np.array([g.shape[0], g.shape[1]])
+        STATE["xmin"] = np.array([box_bounds["xmin"], box_bounds["ymin"]])
+        STATE["xmax"] = np.array([box_bounds["xmax"], box_bounds["ymax"]])
+
+def set_density_e(STATE):
+    _set_density(STATE, "edens")
+{% for ion in species_list %}
+def set_density_{{ ion }}(STATE):
+    _set_density(STATE, "{{ ion }}dens")
+{% endfor %}

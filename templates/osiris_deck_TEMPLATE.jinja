@@ -1,0 +1,236 @@
+!----------------- Input deck illustrating the Python-Fortran interface ------------------
+! To run this input deck as is, first put the input deck, OSIRIS executable, and the
+! py-script-{{ dims }}d.py file all in the same directory.  Next, do `export PYTHONPATH=.` to set the Python
+! path to the directory that contains the py-script-{{ dims }}d.py file (current directory). Finally,
+! execute `./osiris-{{ dims }}D.e {{ inputfile_name }}` to run the simulation, which will use the
+! py-script-{{ dims }}d.py and interp.npy files to set various field and particle data.
+!-----------------------------------------------------------------------------------------
+
+!----------global simulation parameters----------
+simulation
+{
+    parallel_io = "mpi",
+    algorithm = "{{ algorithm }}",
+}
+
+!--------the node configuration for this simulation--------
+node_conf
+{
+    {% if dims == 1 %}
+    node_number = {{ node_number[0] }},
+    n_threads = {{ num_threads }},
+    if_periodic(1:1) = .false.,
+    {% else %}
+    node_number = {{ node_number[0] }}, {{ node_number[1] }},
+    n_threads = {{ num_threads }},
+    if_periodic(1:2) = .true., .false.,
+    {% endif %}
+    {% if algorithm in ["cuda", "tiles"] %}
+    {% if dims ==1 %}tile_number(1:1) = {{ tile_numbers[0] }},{% else %}
+    tile_number(1:{{ dims }}) = {{ tile_numbers|join(', ') }},{% endif %} {% endif %}
+}
+
+!----------spatial grid----------
+grid
+{
+    {% if dims == 1 %}nx_p(1:1) = {{ nx }},{% else %}
+    nx_p(1:2) = {{ nx }}, {{ ny }},
+    !load_balance(1:2) = .true., .true.,
+    !lb_type = "dynamic",
+    !n_dynamic = 1024, ! estimate this to be once per crossing time
+    !cell_weight = 1.0,
+    !ndump_global_load = 1,
+    !start_load_balance = 100,
+    !balance_on_start = .false.,{% endif %}
+}
+
+!----------time step and global data dump timestep number----------
+time_step
+{
+    dt     =  {{ dt }},
+    ndump  =  {{ ndump }},
+}
+
+!----------restart information----------
+restart
+{
+    ndump_fac = -1,
+    ndump_time = 3500, !once/hour
+    if_restart = {{ if_restart }},
+    if_remold = .true.,
+}
+
+!----------spatial limits of the simulations----------
+space
+{
+    {% if dims == 1 %}! This is euclidean distance, not the span in y direction
+    ! Start point in {{ dims }}D plane is specified in py-script-{{ dims }}d
+    xmin =  0, ! This should always be == 0
+    xmax =  {{ xmax }},
+    {% else %}
+    xmin(1:2) = {{ xmin }}, {{ ymin }},
+    xmax(1:2) = {{ xmax }}, {{ ymax }},
+    {% endif %}
+}
+
+!----------time limits ----------
+time
+{
+    tmin = 0.0,
+    tmax  = {{ tmax }},
+}
+
+!----------field solver set up----------
+el_mag_fld
+{
+    ! Note, you need to set PYTHONPATH in the console to the folder containing py-script-{{ dims }}d.py
+    type_init_b(1:3) = "python", "python", "python",
+    type_init_e(1:3) = "python", "python", "python",
+    init_py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    init_py_func = "set_fld_int", ! Name of function in the Python file to call (same for all components)
+}
+
+!----------boundary conditions for em-fields ----------
+emf_bound
+{
+    {% if dims == 1 %}
+    type(1:2,1) =   "{{ emf_boundary[0] }}", "{{ emf_boundary[1] }}",
+    vpml_bnd_size = {{ vpml_bnd_size }},
+    vpml_diffuse(1:2,1) = .true., .true.,
+    {% else %}
+    type(1:2,2) =  "{{ emf_boundary[0] }}", "{{ emf_boundary[1] }}",
+    vpml_diffuse(2,2) = .true.,
+    vpml_bnd_size = {{ vpml_bnd_size }},
+    {% endif %}
+}
+
+!----------- electro-magnetic field diagnostics ---------
+diag_emf
+{
+    reports = {% for r in emf_reports %}"{{ r }}, savg",
+    {% endfor %}
+
+    ndump_fac_ave = 2,
+    ndump_fac_ene_int = 10,
+    !ndump_fac_charge_cons = 10,
+    {% if dims == 1 %}
+    n_ave(1:1) = {{ n_ave }},
+    {% else %}
+    n_ave(1:2) = {{ n_ave }}, {{ n_ave }},
+    {% endif %}
+}
+
+!----------number of particle species----------
+particles
+{
+    interpolation = "{{ interpolation }}",
+    num_species = {{ species_list|length }},
+}
+
+{% for species in species_list %}
+!----------information - {{ species['name'] }}----------
+species
+{
+    name = "{{ species['name'] }}",
+    rqm = {{ species['rqm'] }},
+    {% if dims == 1 %}
+    num_par_x = {{ ppc }},
+    {% else %}
+    num_par_x(1:2) = {{ ppc|int }}, {{ ppc|int }},
+    num_par_max = {{ num_par_max|int }},
+    {% endif %}
+    init_type = "python",
+}
+{% if species['name'] not in ['e', 'ele'] %}
+!----------inital proper velocities - {{ species['name'] }}-----------------
+udist
+{
+    use_spatial_uth = .true.,
+    uth_py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    uth_py_func = "set_uth_{{ species['name'] }}", ! Name of function in the Python file to call
+
+    ! use_spatial_ufl = .true.,
+    ufl_py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    ufl_py_func = "set_ufl_i", ! Name of function in the Python file to call
+}
+{% else %}
+!----------inital proper velocities - {{ species['name'] }}-----------------
+udist
+{
+    use_spatial_uth = .true.,
+    uth_py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    uth_py_func = "set_uth_{{ species['name'] }}", ! Name of function in the Python file to call
+
+    ! use_spatial_ufl = .true.,
+    ufl_py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    ufl_py_func = "set_ufl_{{ species['name'] }}", ! Name of function in the Python file to call
+}
+{% endif %}
+!----------density profile - {{ species['name'] }}----------
+profile
+{
+    py_mod = "py-script-{{ dims }}d", ! Name of Python file
+    py_func = "set_density_{{ species['name'] }}", ! Name of function in the Python file to call
+}
+
+!----------boundary conditions - {{ species['name'] }}----------
+spe_bound
+{
+    {% if dims == 1 %}type(1:2,1) = "{{ part_boundary[0] }}","{{ part_boundary[1] }}",
+    uth_bnd(1:3,1,1) = {{ species['vth_start'] }}, {{ species['vth_start'] }}, {{ species['vth_start'] }},
+    uth_bnd(1:3,2,1) = {{ species['vth_end'] }}, {{ species['vth_end'] }}, {{ species['vth_end'] }},{% else %}
+    ! direction 1 (x) is periodic (see node_conf if_periodic); only direction 2 (y) is set
+    type(1:2,2) = "{{ part_boundary[0] }}","{{ part_boundary[1] }}",
+    uth_bnd(1:3,1,2) = {{ species['vth_y_start'] }}, {{ species['vth_y_start'] }}, {{ species['vth_y_start'] }},
+    uth_bnd(1:3,2,2) = {{ species['vth_y_end'] }}, {{ species['vth_y_end'] }}, {{ species['vth_y_end']}}, {% endif %}
+}
+
+!----------diagnostic - {{ species['name'] }}----------
+diag_species
+{
+    ndump_fac_ave = 2,
+    !ndump_fac_temp = 1,
+    ndump_fac_ene = 10,
+    ndump_fac_pha = 1,
+    n_ave(1:{{ dims }}) = {{ n_ave }}{% if dims == 2 %}, {{ n_ave }}{% endif %},
+    reports = {% for r in reports %}"{{ r }}, savg", {% endfor %}
+
+    rep_udist = {% for u in rep_udist %}"{{ u }}", {% endfor %}
+
+
+    {% if species['name'] in ['e', 'ele', 'electron'] %}
+    ps_pmin(1:3) = {{ e_ps_pmin[0] }}, {{ e_ps_pmin[1] }}, {{ e_ps_pmin[2] }},
+    ps_pmax(1:3) = {{ e_ps_pmax[0] }},  {{ e_ps_pmax[1] }},  {{ e_ps_pmax[2] }},
+    {% else %}
+    ps_pmin(1:3) = {{ i_ps_pmin[0] }}, {{ i_ps_pmin[1] }}, {{ i_ps_pmin[2] }},
+    ps_pmax(1:3) = {{ i_ps_pmax[0] }},  {{ i_ps_pmax[1] }},  {{ i_ps_pmax[2] }},
+    {% endif %}
+    {% if dims == 1 %}ps_xmin(1:1) = 0.0,
+    ps_xmax(1:1) = {{ xmax }},{% else %}
+    ps_xmin(1:{{ dims }}) = {{ xmin }}, {{ ymin }},
+    ps_xmax(1:{{ dims }}) = {{ xmax }}, {{ ymax }},{% endif %}
+    ps_np = {{ ps_np[0] }}, {{ ps_np[1] }}, {{ ps_np[2] }},
+    if_ps_gamma_auto = .true.,
+    ps_gammamin = 1.0,
+    ps_gammamax = {{ ps_gammamax }},
+    ps_ngamma = {{ ps_ngamma }},
+    {% if dims == 1 %}
+    ps_nx = {{ ps_nx }},
+    phasespaces = {% for p in phasespaces %}"{{ p }}", {% endfor %}
+
+    {% else %}
+    ps_nx(1:{{ dims }}) = {{ ps_nx }}, {{ ps_ny }},
+    phasespaces = {% for p in phasespaces %}"{{ p }}", {% endfor %}
+
+    {% endif %}
+}
+{% endfor %}
+
+!--------Current smoothing----------
+smooth
+{
+    type(1:{{ dims }}) = "{{ smooth_type }}",
+    order(1:{{ dims }}) = {{ smooth_order }},
+}
+
+!---------- end of osiris input file -------------

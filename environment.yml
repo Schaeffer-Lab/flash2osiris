@@ -1,0 +1,19 @@
+# Conda environment for the FLASH -> OSIRIS generator.
+# Create with:  conda env create -f environment.yml   (then: conda activate flash2osiris)
+name: flash2osiris
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - numpy
+  - scipy
+  - h5py
+  - yt>=4.0          # reads FLASH HDF5 plot files + the species plugin
+  - unyt             # yt's unit system
+  - jinja2           # deck / py-script templating
+  - pyyaml           # run.yaml I/O
+  - astropy          # cm -> c/omega_pe lineout conversion
+  - matplotlib       # diagnostic plots
+  - pip
+  - pip:
+      - plasmapy     # inertial_length (c/omega_pe) for 1D lineout endpoints
