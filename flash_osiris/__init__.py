@@ -2,7 +2,8 @@
 
 Two modules:
   * ``yt_plugin``  -- the yt plugin (symlink to ~/.config/yt/my_plugins.py); the SINGLE
-                      place that knows about ion species (MOLAR_WEIGHTS + masks).
+                      place that knows how OSIRIS ion populations are defined from the
+                      FLASH materials (target / chamber / ...), not from ion mass.
   * ``generator``  -- reads a run.yaml, loads FLASH via the plugin, and renders the
                       OSIRIS deck + python-init script + interpolation slices.
 

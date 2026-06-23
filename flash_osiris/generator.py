@@ -35,7 +35,7 @@ class FLASH_OSIRIS_Base:
                  tmax_gyroperiods: float,
                  algorithm: str,
                  deck_options: Dict,
-                 species: List[str],         # ion species names (charge_states keys)
+                 species_names: Dict[str, str] = None,  # optional {flash_material: osiris_name} rename
                  theta: float = None,        # 1D only (set by FLASH_OSIRIS_1D)
                  distance: float = None,     # 1D only (set by FLASH_OSIRIS_1D)
                  normalizations_override: Dict[str, float] = {}):
@@ -52,12 +52,14 @@ class FLASH_OSIRIS_Base:
         self.interpolation = self.deck['interpolation']
         self.dx = dx
         self.rqm_factor = rqm_normalization_factor
-        # Ion species names (the run.yaml charge_states keys, e.g. ['al', 'si']); the
-        # yt plugin builds the matching <name>dens / vth<name> fields and the species
-        # mask from this same list.
-        self.species_names = list(species)
-        # species_rqms is derived from FLASH (mean 1836/ye over each species' mask,
-        # restricted to the OSIRIS domain) once the covering grid + coords exist.
+        # Ion populations are auto-detected from the FLASH materials by the yt plugin
+        # (target / chamber / ...); species_names is an optional {flash_material:
+        # osiris_name} rename. self.species_names (the OSIRIS species names) is filled in
+        # from the plugin once the dump is loaded, below.
+        self._species_names_override = species_names
+        # species_rqms is derived from FLASH (density-weighted mean 1836/ye over each
+        # population's dominant-material cells, restricted to the OSIRIS domain) once the
+        # covering grid + coords exist.
         self.tmax_gyroperiods = tmax_gyroperiods
         self.algorithm = algorithm
         self.dt = self.dx * 0.95 / np.sqrt(self.osiris_dims) # CFL condition
@@ -84,10 +86,14 @@ class FLASH_OSIRIS_Base:
         logger.info(f"Loading FLASH data from {self.FLASH_data}")
         self.ds = yt.load_for_osiris(self.FLASH_data.as_posix(),
                                      rqm_factor=self.rqm_factor,
-                                     species=self.species_names)
-        # {name: mask_int} assigned by the plugin (1 = lightest ion); used below to
-        # attribute the FLASH species_mask to each named species.
-        self.species_masks = self.ds.osiris_species_masks
+                                     species_names=self._species_names_override)
+        # Populations the plugin built from the FLASH materials:
+        #   osiris_species_materials : {osiris_name -> flash material field}
+        #   osiris_dominant_index    : {osiris_name -> dominant_material integer}
+        self.species_materials = self.ds.osiris_species_materials
+        self.species_dominant_index = self.ds.osiris_dominant_index
+        self.species_names = list(self.species_materials.keys())
+        logger.info(f"Ion populations (osiris_name <- flash material): {self.species_materials}")
 
         level = 3 # If you are getting inexplicable crashes, you are probably running out of memory. This is probably the culprit.
         self.dims = self.ds.domain_dimensions * self.ds.refine_by**level
@@ -111,11 +117,11 @@ class FLASH_OSIRIS_Base:
         logger.info(f"y bounds: {np.round(self.y[[0, -1]], 2)} c/w_pe")
         logger.info(f"z bounds: {np.round(self.z[[0, -1]], 2)} c/w_pe")
 
-        # Per-species OSIRIS rqm (mass-per-charge) straight from FLASH: rqm = 1836/ye,
-        # averaged over the OSIRIS domain (the lineout for 1D / the box for 2D) within
-        # each species' mask. No charge state is specified by the user.
+        # Per-population OSIRIS rqm (mass-per-charge) straight from FLASH: rqm = 1836/ye,
+        # electron-density weighted over each population's dominant-material cells in the
+        # OSIRIS domain (lineout for 1D / box for 2D). No charge state is specified.
         self.species_rqms = self._compute_species_rqms()
-        logger.info(f"FLASH-derived species rqms (mean 1836/ye over domain): {self.species_rqms}")
+        logger.info(f"FLASH-derived population rqms (edens-wt 1836/ye): {self.species_rqms}")
 
 
         debye_osiris = np.sqrt(
@@ -127,8 +133,13 @@ class FLASH_OSIRIS_Base:
         logger.info(f"Background temperature: {(self.all_data['flash', 'tele'][-1, -1, 0] * yt.units.boltzmann_constant).to('eV'):.3e}")
 
 
-        self.rqm_real = 1836 / self.all_data['flash', 'ye'][-1, -1, 0]
-        logger.info(f"{'*'*10} real mass ratio: {self.rqm_real} {'*'*10}")
+        # Diagnostic only (not used downstream): at the domain corner, the OSIRIS
+        # mass-per-charge rqm = 1836/ye and the true ion/electron mass ratio = 1836/sumy.
+        corner_ye = self.all_data['flash', 'ye'][-1, -1, 0]
+        corner_sumy = self.all_data['flash', 'sumy'][-1, -1, 0]
+        self.rqm_real = 1836 / corner_ye
+        logger.info(f"{'*'*10} corner mass-per-charge (1836/ye): {self.rqm_real:.1f}; "
+                    f"corner mass ratio m_i/m_e (1836/sumy): {1836/corner_sumy:.1f} {'*'*10}")
 
 
         logger.info("normalizing plasma parameters")
@@ -161,9 +172,12 @@ class FLASH_OSIRIS_Base:
             self.normalizations[f'vth{name}'] = v_norm
 
         # Calculate gyrotime and simulation duration.  The run length is set in ion
-        # gyroperiods of the lightest species (mask 1), matching the original Al/Si
-        # behaviour (which used 'al', the lighter ion).
-        ref_species = next(iter(self.species_masks))  # mask-order: lightest first
+        # gyroperiods of the LIGHTEST population (smallest effective ion mass m_i =
+        # 1836/sumy), matching the original Al/Si behaviour (which used 'al', the
+        # lighter ion).  The gyroperiod scales with that population's mass-per-charge rqm.
+        ref_species = min(self.species_eff_mass, key=self.species_eff_mass.get)
+        logger.info(f"Gyrotime reference population (lightest): {ref_species} "
+                    f"(eff. mass m_i/m_e = {self.species_eff_mass[ref_species]:.1f})")
         self.gyrotime = self.species_rqms[ref_species] / self.rqm_factor / (self.all_data['flash', 'magz'][-1, -1, 0] / self.normalizations['magz'])
         self.tmax = int(self.gyrotime * self.tmax_gyroperiods)
 
@@ -195,10 +209,16 @@ class FLASH_OSIRIS_Base:
 
 
     def _compute_species_rqms(self):
-        """Per-species OSIRIS rqm (mass-per-charge) straight from FLASH: rqm = 1836/ye,
-        averaged over the OSIRIS domain (lineout for 1D, box for 2D) within each
-        species' mask.  The name -> mask mapping comes from the yt plugin
-        (self.species_masks), so species are never hard-coded here."""
+        """Per-population OSIRIS rqm (mass-per-charge, = 1836/ye) and effective ion mass
+        (m_i/m_e = 1836/sumy), straight from FLASH and restricted to the OSIRIS domain
+        (lineout for 1D, box for 2D).
+
+        Each cell is attributed to a population by the plugin's ``dominant_material``
+        field (the FLASH material that dominates the cell), so populations are separated
+        by material -- never by ion mass and never hard-coded here.  The per-population
+        rqm and effective mass are **electron-density weighted** averages over that
+        population's cells, so near-vacuum cells (which can be force-assigned by the
+        argmax) carry ~no weight.  Sets ``self.species_eff_mass`` and returns the rqms."""
         from scipy.interpolate import RegularGridInterpolator
         mid = self.dims[2] // 2
         if self.osiris_dims == 1:
@@ -209,24 +229,34 @@ class FLASH_OSIRIS_Base:
                                  np.linspace(self.ymin, self.ymax, 128))
             pts = np.column_stack([gx.ravel(), gy.ravel()])
 
-        ye = np.asarray(self.all_data['flash', 'ye'][:, :, mid])
-        self.all_data.clear_data()
-        mask = np.asarray(self.all_data['flash', 'species_mask'][:, :, mid])
-        self.all_data.clear_data()
-        ye_line = RegularGridInterpolator((self.x, self.y), ye, bounds_error=True)(pts)
-        mask_line = RegularGridInterpolator((self.x, self.y), mask,
-                                            method='nearest', bounds_error=True)(pts)
+        def sample(field, method='linear'):
+            arr = np.asarray(self.all_data['flash', field][:, :, mid])
+            self.all_data.clear_data()
+            return RegularGridInterpolator((self.x, self.y), arr, method=method,
+                                           bounds_error=True)(pts)
+
+        ye_line = sample('ye')
+        sumy_line = sample('sumy')
+        edens_line = sample('edens')
+        dom_line = sample('dominant_material', method='nearest')
         rqm_line = PROTON_ELECTRON_MASS_RATIO / ye_line
+        mass_line = PROTON_ELECTRON_MASS_RATIO / sumy_line
 
         rqms = {}
-        for name, mval in self.species_masks.items():
-            sel = np.round(mask_line) == mval
-            if sel.any():
-                rqms[name] = float(np.mean(rqm_line[sel]))
+        self.species_eff_mass = {}
+        for name, didx in self.species_dominant_index.items():
+            sel = np.round(dom_line).astype(int) == didx
+            w = edens_line * sel
+            if sel.any() and w.sum() > 0:
+                rqms[name] = float(np.average(rqm_line[sel], weights=edens_line[sel]))
+                self.species_eff_mass[name] = float(np.average(mass_line[sel], weights=edens_line[sel]))
             else:
-                rqms[name] = float(np.mean(rqm_line))  # species absent in domain
-                logger.warning(f"Species '{name}' (mask {mval}) absent in the OSIRIS "
-                               f"domain; using domain-mean rqm {rqms[name]:.1f} as placeholder.")
+                rqms[name] = float(np.average(rqm_line, weights=edens_line))
+                self.species_eff_mass[name] = float(np.average(mass_line, weights=edens_line))
+                logger.warning(f"Population '{name}' (material "
+                               f"'{self.species_materials[name]}') has no electron density "
+                               f"in the OSIRIS domain; using domain-mean rqm "
+                               f"{rqms[name]:.1f} as placeholder.")
         return rqms
 
     def save_slices(self, normal_axis="z"):
@@ -1065,9 +1095,10 @@ def _str2bool(v):
     raise argparse.ArgumentTypeError("expected true/false")
 
 
-# Top-level run.yaml keys that are analysis metadata, NOT generator inputs: kept
-# nested (not flattened into the argparse namespace) so they survive round-trips.
-_METADATA_KEYS = {"charge_states"}
+# Top-level run.yaml keys that are dict-valued and must survive into the argparse
+# namespace WHOLE (not flattened): species_names is the optional {flash_material:
+# osiris_name} population rename; charge_states is analysis-only metadata.
+_METADATA_KEYS = {"charge_states", "species_names"}
 
 
 def load_run_config(path):
@@ -1094,9 +1125,9 @@ def build_run_spec(args):
     """Build the canonical (nested, re-runnable) run.yaml dict from resolved args.
 
     The result is both the frozen provenance record written into the run dir and a
-    valid ``--config`` input (see :func:`load_run_config`).  ``charge_states`` is
-    carried through for downstream analysis even though the generator derives rqm
-    from FLASH and never uses it.
+    valid ``--config`` input (see :func:`load_run_config`).  ``species_names`` (the
+    optional population rename) and ``charge_states`` (analysis-only metadata) are
+    carried through; the generator derives rqm/mass from FLASH and uses neither value.
     """
     spec = {
         "data_path": str(args.data_path),
@@ -1113,6 +1144,9 @@ def build_run_spec(args):
         "n_dump_total": args.n_dump_total,
         "restart": args.restart,
     }
+    species_names = getattr(args, "species_names", None)
+    if species_names is not None:
+        spec["species_names"] = species_names
     charge_states = getattr(args, "charge_states", None)
     if charge_states is not None:
         spec["charge_states"] = charge_states
@@ -1161,37 +1195,17 @@ def freeze_run_yaml(out_dir, args):
     return out_path
 
 
-def _resolve_species(args):
-    """Ion species names for this run.
-
-    Precedence: an explicit ``--species`` list, else the keys of ``charge_states``
-    from the run.yaml.  These names drive the yt plugin's per-species fields and
-    mask, so each must be present in the plugin's ``MOLAR_WEIGHTS`` table.
-    """
-    species = getattr(args, "species", None)
-    if not species:
-        charge_states = getattr(args, "charge_states", None)
-        if charge_states:
-            species = list(charge_states.keys())
-    if not species:
-        raise SystemExit(
-            "No ion species given: add a `charge_states` mapping to the run.yaml "
-            "(e.g. {al: 13, si: 14}) or pass --species al si."
-        )
-    return list(species)
-
-
 def main(args):
     # The only checks argparse can't express (types/choices/required are handled
     # by the parser); dim-specific geometry is asserted in the branches below.
     assert Path(args.data_path).exists(), f"FLASH data not found: {args.data_path}"
 
-    # The ion species are the keys of charge_states (e.g. {al: 13, si: 14} -> ['al',
-    # 'si']), or an explicit --species override.  species rqm (mass-per-charge) is then
-    # derived from FLASH inside the class (1836/ye averaged over the OSIRIS domain per
-    # species); the charge-state *values* are only carried through to analysis.
-    species = _resolve_species(args)
-    logger.info(f"Ion species: {species}")
+    # Ion populations are auto-detected from the FLASH materials (target / chamber / ...)
+    # by the yt plugin; species_names is an optional {flash_material: osiris_name} rename
+    # from the run.yaml (e.g. {cham: al, targ: si} or {targ: piston, cham: background}).
+    # Per-population rqm/mass are derived from FLASH (1836/ye, 1836/sumy) inside the class.
+    species_names = getattr(args, "species_names", None)
+    logger.info(f"Population rename (species_names): {species_names}")
 
     # All deck options come from the CLI -- nothing is defaulted here.
     deck_options = {
@@ -1231,7 +1245,7 @@ def main(args):
         tmax_gyroperiods=args.tmax_gyroperiods,
         algorithm=args.algorithm,
         deck_options=deck_options,
-        species=species,
+        species_names=species_names,
     )
 
     if args.dim == 1:
@@ -1305,12 +1319,9 @@ def parse_args(argv=None):
     p.add_argument('--ppc', type=int, required=True, help="Particles per cell (per dimension)")
     p.add_argument('--tmax_gyroperiods', type=float, required=True, help="Run length [ion gyroperiods]")
     p.add_argument('--algorithm', type=str, choices=["cpu", "cuda", "tiles"], required=True)
-    # Ion species names. Normally taken from the run.yaml charge_states keys; this is
-    # an optional override for pure-CLI use. Each name must be in MOLAR_WEIGHTS
-    # (yt_plugin.py). species rqm is derived from FLASH (1836/ye); the charge-state
-    # values are carried through to analysis only.
-    p.add_argument('--species', type=str, nargs='+', default=None,
-                   help="Ion species names (default: charge_states keys from --config)")
+    # Ion populations are auto-detected from the FLASH materials; the optional
+    # {flash_material: osiris_name} rename lives in the run.yaml `species_names` key
+    # (dict-valued, so it is config-only -- not a CLI flag).
 
     # --- geometry: 1D lineout (cm) OR 2D box (c/omega_pe) ---
     p.add_argument('--start_point', type=float, nargs=3, help="[1D] lineout start (x y z) [cm]")

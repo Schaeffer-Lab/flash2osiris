@@ -11,7 +11,8 @@ Given a FLASH HDF5 plot file and a small `run.yaml`, this tool:
 4. renders the OSIRIS input **deck** and the **python-init script** (which interpolates
    those slices onto the OSIRIS grid at runtime).
 
-It works with **arbitrary ion species** — you only name the ions in the run spec.
+It works with **arbitrary plasmas** — ion populations are auto-detected from the FLASH
+materials (laser target vs. background gas), so you usually configure nothing.
 
 ---
 
@@ -27,10 +28,10 @@ flash2osiris/
 │   ├── osiris_deck_TEMPLATE.jinja   # OSIRIS input deck (species-generic)
 │   └── py_init_TEMPLATE.jinja       # OSIRIS python-init script (species-generic)
 ├── examples/
-│   ├── perlmutter_1d.run.yaml             # 1D lineout (Al/Si)
-│   ├── perlmutter_2d.run.yaml             # 2D box (Al/Si)
-│   └── example_carbon_hydrogen.run.yaml   # different ions, to show plug-and-play
-├── tests/test_species.py   # unit tests for the species-mask logic
+│   ├── perlmutter_1d.run.yaml               # 1D lineout (Al chamber / Si target)
+│   ├── perlmutter_2d.run.yaml               # 2D box (Al chamber / Si target)
+│   └── example_magshock2019_ch.run.yaml     # CH piston/background, to show plug-and-play
+├── tests/test_species.py   # unit tests for the population (material) logic
 ├── environment.yml         # conda env (yt, jinja2, plasmapy, ...)
 ├── setup_plugin.sh         # links the yt plugin into ~/.config/yt/
 └── runme.sh                # thin wrapper: python -m flash_osiris.generator --config ...
@@ -74,42 +75,53 @@ run.yaml or an explicit flag (CLI flags override the config). See
 
 ---
 
-## Configuring ion species (the important part)
+## Configuring ion populations (the important part)
 
-**Species are named once, as the keys of `charge_states` in the run.yaml:**
+OSIRIS ion populations are separated by **FLASH material**, not by ion mass. FLASH
+laser-HEDP runs (`+mtmmmt`, `species=...` in the setup) carry a mass-fraction field per
+material — typically `targ` (the laser **target**/piston) and `cham` (the **chamber**/
+background gas), plus a `vac` vacuum that is dropped. A cell belongs to whichever
+material dominates it. **This is auto-detected from the dump, so the default config is
+nothing at all.**
+
+Why material and not mass? Because the populations you care about (piston vs background)
+can be the *same element mix*. In the CH example both `targ` and `cham` are a
+carbon-hydrogen plasma — identical `sumy`, so a mass-based split physically cannot tell
+them apart, but the material fields can.
+
+Optionally rename the OSIRIS species with `species_names` (keys are FLASH material
+fields, values are the names you want):
 
 ```yaml
-charge_states: {al: 13, si: 14}    # ions = al, si; values are physical charge states Z
+species_names: {targ: piston, cham: background}   # name populations by role
+# or, to reproduce the historical Al/Si run (cham=Al chamber, targ=Si target):
+species_names: {cham: al, targ: si}
 ```
 
-To run a different plasma, just change those keys — e.g. `{c: 6, h: 1}` (see
-`examples/example_carbon_hydrogen.run.yaml`). Nothing else needs editing. From that
-list the generator automatically builds, for each ion:
+From the materials the generator automatically builds, for each population:
 
-- a **species mask** that separates the ions by mean ion mass in the FLASH data,
-- a charge-density field `<name>dens` and thermal-velocity field `vth<name>`,
-- the per-species OSIRIS `rqm = 1836/ye` (averaged over the OSIRIS domain per ion),
+- a `dominant_material` field and a charge-density field `<name>dens` (the electron
+  density where that material dominates) and thermal-velocity field `vth<name>`,
+- the per-population OSIRIS `rqm = 1836/ye` and effective ion mass `m_i/m_e = 1836/sumy`,
+  both **electron-density-weighted** over that population's cells in the OSIRIS domain —
+  correct even for a compound (CH) material, with **no atomic-weight table needed**,
 - the OSIRIS species blocks in the deck and the matching init functions in the py-script.
 
 ### The one file to know: `flash_osiris/yt_plugin.py`
 
-All species knowledge is consolidated here. It holds a `MOLAR_WEIGHTS` table (atomic
-weights) and the mask logic. Each ion you name must be in that table; the lookup is
-case-insensitive (`al` → `Al`). Ions are ordered by **ascending atomic mass**, and
-mask `1` is the lightest. For `{al, si}` this reproduces the original convention
-exactly (`al → 1`, `si → 2`, one mass threshold at ≈27.5 u).
-
-**To add a new element:** add one row to `MOLAR_WEIGHTS` (if it isn't already there)
-and list its name in `charge_states`. No other code changes.
-
-The generator reads the resulting name→mask mapping straight off the dataset
-(`ds.osiris_species_masks`), so the plugin and the generator can never disagree about
-which mask integer is which ion.
+All population knowledge is consolidated here: `parse_flash_species` (read the
+`species=...` material list from the dump), `resolve_populations` (drop vacuum, apply
+the `species_names` rename, assign each a dominant-material index), and the
+`dominant_material`/`<name>dens` field registration. The generator reads the resulting
+name→material and name→index maps straight off the dataset
+(`ds.osiris_species_materials` / `ds.osiris_dominant_index`), so the plugin and the
+generator can never disagree about which population is which.
 
 > Charge state `Z` is **not** passed to OSIRIS explicitly: ions are loaded
-> charge-equivalently (density = `n_e`, `q = +1`) with mass-per-charge `rqm = m_i/(Z
-> m_e)`, and `Z` folds in implicitly through the FLASH `ye`/`sumy` fields. The
-> `charge_states` values are carried through to downstream analysis, which needs `Z`.
+> charge-equivalently (density = `n_e`, `q = +1`) with mass-per-charge `rqm = 1836/ye =
+> m_i/(Z m_e)`, and `Z` folds in implicitly through the FLASH `ye`/`sumy` fields. An
+> optional `charge_states` map in the run.yaml is **analysis-only metadata** (the
+> generator never reads it) — carry it if downstream analysis needs `Z`.
 
 ---
 
@@ -125,11 +137,17 @@ them (standard FLASH MHD + ionization output):
 | bulk velocity          | `velx`, `vely`, `velz` |
 | temperatures           | `tele` (electron), `tion` (ion) |
 | ionization / mean mass | `ye` (electrons per baryon), `sumy` (ions per baryon = 1/Ā) |
+| materials              | one mass-fraction field per `species=` material (e.g. `targ`, `cham`) |
 
 From these it derives the E-field (`v×B/c`), current density (Ampère's law), ion/
-electron drift velocities, the species mask, and the per-species densities and thermal
-velocities. The species mask uses `1/sumy` (mean ion mass in proton masses) to
-separate ions — so the FLASH run must actually contain the ions you list.
+electron drift velocities, the `dominant_material` field, and the per-population
+densities and thermal velocities. The material list is read from the dump's `species=`
+setup string (in `sim info`); the vacuum material is dropped automatically.
+
+> **Heads-up:** the OSIRIS init fundamentally needs `velx/vely/velz` and the full
+> `magx/magy/magz`. Some FLASH plot files are written with a reduced variable list that
+> omits them (e.g. `MagShock2019_hdf5_plt_cnt_0008` ships only `magx/magy`, no
+> velocities) — use a checkpoint or a re-dump that includes them.
 
 ---
 

@@ -1,0 +1,68 @@
+# Example run spec for a CH (carbon+hydrogen) plasma where the laser-produced piston
+# and the background are the SAME composition -- so they can ONLY be separated by FLASH
+# material (targ vs cham), not by ion mass. This is exactly what the material-based
+# population definition is for: you label the populations by ROLE, not by element.
+#
+# This dump (MagShock2019, species=cham,targ,vac; both cham & targ use the CH EOS table)
+# demonstrates the plug-and-play: switching plasmas needs nothing but the species_names
+# rename below (and often not even that -- omit it to keep the FLASH field names).
+#
+#   conda activate flash2osiris
+#   python -m flash_osiris.generator --config examples/example_magshock2019_ch.run.yaml
+#
+# NOTE: a deck can only be generated once the FLASH dump also stores the bulk velocity
+# (velx/vely/velz) and full B (magz); the OSIRIS init needs them (E = -vxB/c, drifts,
+# gyrotime). The MagShock2019_hdf5_plt_cnt_0008 plot file ships without them -- use a
+# checkpoint / re-dump with those fields included.
+
+data_path: /pscratch/sd/d/dschnei/MagShock2019_hdf5_plt_cnt_0008
+dim: 2
+inputfile_name: magshock2019_ch_2d
+reference_density: 5.0e18      # cm^-3 (dot required so YAML parses as float)
+rqm_factor: 100
+dx: 1.0                         # c/omega_pe
+ppc: 3
+tmax_gyroperiods: 20
+algorithm: cuda
+node_number: [4, 4]
+num_threads: 1
+n_dump_total: 512
+restart: false
+
+# Name the populations by ROLE. Keys are FLASH material fields (targ=laser target/piston,
+# cham=chamber/background); values are the OSIRIS species names. Drop this whole key to
+# keep the FLASH field names (targ/cham) as the species names. The vacuum material (vac)
+# is auto-excluded. rqm/effective-mass are derived from FLASH (1836/ye, 1836/sumy) per
+# population -- correct for a CH compound, with no molar-weight table needed.
+species_names: {targ: piston, cham: background}
+
+# 2D box in c/omega_pe (adjust to the plasma region of your dump).
+geometry:
+  xmin: -2000
+  xmax: 2000
+  ymin: 300
+  ymax: 3000
+
+solver:
+  vpml_bnd_size: 100
+  emf_boundary: [pmc, vpml]
+  part_boundary: [thermal, thermal]
+  interpolation: cubic
+  smooth_type: binomial
+  smooth_order: 2
+
+diagnostics:
+  n_ave: 6
+  emf_reports: [b1, b2, b3, e1, e2, e3]
+  reports: [charge, j1, j2, j3, q1, q2, q3]
+  rep_udist: [uth1, uth2, ufl1, ufl2]
+  phasespaces: [p1x1, p2x1, p3x1, gx1]
+  e_ps_pmin: [-1, -1, -0.5]
+  e_ps_pmax: [1, 1, 0.5]
+  i_ps_pmin: [-0.1, -0.1, -0.05]
+  i_ps_pmax: [0.1, 0.1, 0.05]
+  ps_np: [4096, 4096, 4096]
+  ps_ngamma: 128
+  ps_gammamax: 3.0
+  ps_nx: 1024
+  ps_ny: 512
