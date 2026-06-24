@@ -10,7 +10,7 @@
 simulation
 {
     parallel_io = "mpi",
-    algorithm = "{{ algorithm }}",
+    {% if algorithm in ["cuda", "tiles"] %}algorithm = "{{ algorithm }}",{% endif %}
 }
 
 !--------the node configuration for this simulation--------

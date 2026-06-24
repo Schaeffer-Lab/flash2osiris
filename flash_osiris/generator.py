@@ -96,7 +96,13 @@ class FLASH_OSIRIS_Base:
         logger.info(f"Ion populations (osiris_name <- flash material): {self.species_materials}")
 
         level = 3 # If you are getting inexplicable crashes, you are probably running out of memory. This is probably the culprit.
-        self.dims = self.ds.domain_dimensions * self.ds.refine_by**level
+        # FLASH 2D dumps are degenerate in the unused axis (domain_dimensions == 1 there);
+        # refining that axis fabricates phantom cells and garbage data (e.g. an 8-deep z
+        # slab built from a single real z-cell). Only refine the non-degenerate dimensions.
+        refine = self.ds.refine_by ** level
+        self.dims = np.where(self.ds.domain_dimensions > 1,
+                             self.ds.domain_dimensions * refine,
+                             self.ds.domain_dimensions).astype(int)
 
         logger.info(f"Creating covering grid at level {level} with dims {self.dims}")
 
@@ -178,7 +184,13 @@ class FLASH_OSIRIS_Base:
         ref_species = min(self.species_eff_mass, key=self.species_eff_mass.get)
         logger.info(f"Gyrotime reference population (lightest): {ref_species} "
                     f"(eff. mass m_i/m_e = {self.species_eff_mass[ref_species]:.1f})")
-        self.gyrotime = self.species_rqms[ref_species] / self.rqm_factor / (self.all_data['flash', 'magz'][-1, -1, 0] / self.normalizations['magz'])
+        # Gyrofrequency uses the TOTAL field magnitude |B| = sqrt(magx^2+magy^2+magz^2),
+        # not a single component: the magnetizing field here is in-plane, so a magz-only
+        # gyrofreq is wrong for this geometry. Sample |B| over the OSIRIS domain (median)
+        # instead of one full-box corner that can land in field-free vacuum (-> inf).
+        B_norm_domain = self._domain_B_magnitude() / self.normalizations['magz']
+        logger.info(f"Domain-median |B|: {float(B_norm_domain):.4e} OSIRIS units")
+        self.gyrotime = self.species_rqms[ref_species] / self.rqm_factor / B_norm_domain
         self.tmax = int(self.gyrotime * self.tmax_gyroperiods)
 
         # Verify. From the OSIRIS website we know that
@@ -258,6 +270,34 @@ class FLASH_OSIRIS_Base:
                                f"in the OSIRIS domain; using domain-mean rqm "
                                f"{rqms[name]:.1f} as placeholder.")
         return rqms
+
+    def _domain_B_magnitude(self):
+        """Median total magnetic-field magnitude |B| over the OSIRIS domain (lineout for
+        1D, box grid for 2D), returned as a YTQuantity in the B-normalization units.
+
+        Used to set the ion gyroperiod. The relevant field is the magnitude |B| =
+        sqrt(magx^2 + magy^2 + magz^2) -- never a single component (which is geometry
+        dependent: the in-plane field dominates here, the out-of-plane field in the
+        original MagShockZ setup). A domain median is robust to the field-free vacuum
+        corners that a single-point sample can hit."""
+        from scipy.interpolate import RegularGridInterpolator
+        mid = self.dims[2] // 2
+        if self.osiris_dims == 1:
+            pts = np.column_stack([np.linspace(self.xmin, self.xmax, 4000),
+                                   np.linspace(self.ymin, self.ymax, 4000)])
+        else:
+            gx, gy = np.meshgrid(np.linspace(self.xmin, self.xmax, 128),
+                                 np.linspace(self.ymin, self.ymax, 128))
+            pts = np.column_stack([gx.ravel(), gy.ravel()])
+
+        b_unit = self.normalizations['magz'].units
+        b2 = np.zeros(len(pts))
+        for comp in ('magx', 'magy', 'magz'):
+            arr = np.asarray(self.all_data['flash', comp][:, :, mid].to(b_unit))
+            self.all_data.clear_data()
+            b2 = b2 + RegularGridInterpolator((self.x, self.y), arr, method='linear',
+                                              bounds_error=True)(pts) ** 2
+        return float(np.median(np.sqrt(b2))) * b_unit
 
     def save_slices(self, normal_axis="z"):
         """
