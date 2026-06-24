@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+flash2osiris.egg-info/PKG-INFO
+flash2osiris.egg-info/SOURCES.txt
+flash2osiris.egg-info/dependency_links.txt
+flash2osiris.egg-info/requires.txt
+flash2osiris.egg-info/top_level.txt
+flash_osiris/__init__.py
+flash_osiris/generator.py
+flash_osiris/yt_plugin.py
+tests/test_species.py

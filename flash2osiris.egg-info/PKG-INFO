@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: flash2osiris
+Version: 0.1.0
+Summary: Convert FLASH MHD output into initialized OSIRIS PIC input decks
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: pyyaml
