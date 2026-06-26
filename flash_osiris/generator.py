@@ -38,6 +38,7 @@ class FLASH_OSIRIS_Base:
                  species_names: Dict[str, str] = None,  # optional {flash_material: osiris_name} rename
                  theta: float = None,        # 1D only (set by FLASH_OSIRIS_1D)
                  distance: float = None,     # 1D only (set by FLASH_OSIRIS_1D)
+                 extension: float = 0.0,     # 1D only: buffer length [c/wpe] beyond the FLASH endpoint
                  normalizations_override: Dict[str, float] = {}):
         # No validation here: this interface is driven only from the terminal, so
         # argument types/choices/required-ness are enforced once by argparse, plus a
@@ -68,7 +69,13 @@ class FLASH_OSIRIS_Base:
         self.ymin = ymin
         self.ymax = ymax
         self.theta = theta
-        self.distance = distance
+        # 1D lineout lengths [c/wpe]: flash_distance is the arc length that stays inside the
+        # FLASH domain (defines the endpoint xmax/ymax, sampled for rqm/|B|); self.distance is
+        # the TOTAL OSIRIS domain = flash_distance + extension. Fields in the extension buffer
+        # are held constant at the endpoint value (see _lineout_points and the py-script clamp).
+        self.flash_distance = distance
+        self.extension = extension
+        self.distance = (distance + extension) if distance is not None else None
         self.normalizations_override = normalizations_override
 
         # Outputs (deck, py-script, interp slices, figures, run.yaml) are written under
@@ -615,8 +622,9 @@ class FLASH_OSIRIS_Base:
         # Prepare the context dictionary for Jinja2 template rendering
         context = {
             "dims": self.osiris_dims,
-            "start_point": [self.xmin, self.ymin], 
+            "start_point": [self.xmin, self.ymin],
             "distance": self.distance,
+            "flash_distance": self.flash_distance,
             "theta": self.theta,
             "xmin": self.xmin,
             "xmax": self.xmax,
@@ -684,7 +692,12 @@ class FLASH_OSIRIS_Base:
                 "xmin": float(self.xmin), "xmax": float(self.xmax),
                 "ymin": float(self.ymin), "ymax": float(self.ymax),
                 "theta_rad": (None if self.theta is None else float(self.theta)),
+                # distance_c_over_wpe is the TOTAL OSIRIS domain (flash lineout + extension);
+                # flash/extension split recorded separately so analysis knows where the
+                # physical FLASH data ends and the held-constant buffer begins.
                 "distance_c_over_wpe": (None if self.distance is None else float(self.distance)),
+                "flash_distance_c_over_wpe": (None if self.flash_distance is None else float(self.flash_distance)),
+                "extension_c_over_wpe": float(self.extension),
             },
         }
 
@@ -695,6 +708,20 @@ class FLASH_OSIRIS_Base:
             yaml.safe_dump(manifest, f, default_flow_style=False, sort_keys=False)
         logger.info(f"Run manifest written to {out_path}")
         return out_path
+
+    def _lineout_points(self, n):
+        """Sample points along the 1D OSIRIS lineout, mirroring the py-script.
+
+        Returns ``(pts, dist)`` where ``dist = linspace(0, self.distance, n)`` spans the FULL
+        OSIRIS domain and ``pts`` are the FLASH (x, y) for arc-length ``clip(dist, 0,
+        flash_distance)`` -- i.e. the extension buffer (dist > flash_distance) is held constant
+        at the endpoint (xmax, ymax), exactly like the runtime clamp in py_init's _flash_xy. So
+        the extension shows up as a flat segment instead of stretching the FLASH profile."""
+        dist = np.linspace(0, self.distance, n)
+        s = np.clip(dist, 0.0, self.flash_distance)
+        x_points = self.xmin + np.cos(self.theta) * s
+        y_points = self.ymin + np.sin(self.theta) * s
+        return np.column_stack([x_points, y_points]), dist
 
     def plot1D(self, fields):
         import matplotlib.pyplot as plt
@@ -724,15 +751,14 @@ class FLASH_OSIRIS_Base:
             ax1.legend()
             plt.colorbar(im, ax=ax1)
 
-            # Create points along the lineout from (xmin, ymin) to (xmax, ymax)
+            # Sample the lineout over the FULL OSIRIS domain; the extension buffer (beyond
+            # flash_distance) is held constant at the endpoint, matching the runtime clamp.
             n_points = 10000
-            
-            x_points = np.linspace(self.xmin, self.xmax, n_points)
-            y_points = np.linspace(self.ymin, self.ymax, n_points)
-            data_line = f(np.column_stack([x_points, y_points]))
-            
+            pts, dist = self._lineout_points(n_points)
+            data_line = f(pts)
+
             # Right subplot: 1D lineout
-            ax2.plot(np.linspace(0, self.distance, n_points), data_line, color='r', linewidth=2)
+            ax2.plot(dist, data_line, color='r', linewidth=2)
             ax2.set_xlabel(r'Distance along lineout [$c/\omega_{pe}$]')
             ax2.set_ylabel(field)
             ax2.set_title(f'{field} - Lineout')
@@ -948,9 +974,8 @@ class FLASH_OSIRIS_Base:
         notes = {'magnetization': sigma_note}
 
         if self.osiris_dims == 1:
-            pts = np.column_stack([np.linspace(self.xmin, self.xmax, n_points),
-                                   np.linspace(self.ymin, self.ymax, n_points)])
-            dist = np.linspace(0, self.distance, n_points)
+            # Full OSIRIS domain; extension buffer held constant at the endpoint (flat segment).
+            pts, dist = self._lineout_points(n_points)
             flash, osiris = self._sample_conservation(pts)
             for key, ylabel, title, fl_lbl, os_lbl, logy in specs:
                 self._overlay_plot(f'{key}_1D.png', dist, flash[key], osiris[key],
@@ -1056,11 +1081,16 @@ class FLASH_OSIRIS_1D(FLASH_OSIRIS_Base):
                  start_point: List[float],
                  distance: float,
                  theta: float,
+                 extension: float = 0.0,
                  **kwargs):
+        # xmax/ymax are the FLASH endpoint (arc-length = distance), kept INSIDE the FLASH
+        # domain so rqm/|B| sampling is unchanged. The optional extension buffer is added to
+        # the total domain in the base class (self.distance), not to the endpoint.
         xmax = distance * np.cos(theta) + start_point[0] # Have it match the form of 2D setup
         ymax = distance * np.sin(theta) + start_point[1]
          # CFL condition
-        super().__init__(osiris_dims=1, theta = theta, distance=distance, xmax=xmax, ymax=ymax,
+        super().__init__(osiris_dims=1, theta = theta, distance=distance, extension=extension,
+                         xmax=xmax, ymax=ymax,
                          ymin=start_point[1], xmin=start_point[0], **kwargs)
 
 
@@ -1079,7 +1109,9 @@ class FLASH_OSIRIS_1D(FLASH_OSIRIS_Base):
             f"Particles per cell: {self.ppc}",
             f"Start point: [{self.xmin}, {self.ymin}] [c/ωpe]",
             f"Ray angle: {self.theta} rad",
-            f"Lineout distance: {self.distance} [c/ωpe]",
+            f"FLASH lineout distance: {self.flash_distance} [c/ωpe]",
+            f"Extension (held-constant buffer): {self.extension} [c/ωpe]",
+            f"Total OSIRIS domain: {self.distance} [c/ωpe]",
             f"Output directory: {self.output_dir}",
             "=" * 50
         ]
@@ -1200,7 +1232,8 @@ def build_run_spec(args):
     if charge_states is not None:
         spec["charge_states"] = charge_states
     if args.dim == 1:
-        spec["geometry"] = {"start_point": args.start_point, "end_point": args.end_point}
+        spec["geometry"] = {"start_point": args.start_point, "end_point": args.end_point,
+                            "extension": getattr(args, "extension", 0.0)}
     else:
         spec["geometry"] = {"xmin": args.xmin, "xmax": args.xmax,
                             "ymin": args.ymin, "ymax": args.ymax}
@@ -1309,10 +1342,15 @@ def main(args):
         x1, y1 = args.end_point[0] / cwpe, args.end_point[1] / cwpe
         distance = float(np.hypot(x1 - x0, y1 - y0))
         theta = float(np.arctan2(y1 - y0, x1 - x0))
+        # Optional extension buffer beyond the endpoint, given in cm (consistent with
+        # start_point/end_point), converted to c/wpe. Fields are held constant there.
+        extension = float(getattr(args, "extension", 0.0) or 0.0) / cwpe
         logger.info(f"c/omega_pe = {cwpe*1e4:.3f} um; lineout start=({x0:.1f},{y0:.1f}) "
-                    f"c/wpe, distance={distance:.1f} c/wpe, theta={theta:.4f} rad")
+                    f"c/wpe, distance={distance:.1f} c/wpe, theta={theta:.4f} rad, "
+                    f"extension={extension:.1f} c/wpe")
 
-        sim = FLASH_OSIRIS_1D(start_point=[x0, y0], distance=distance, theta=theta, **common)
+        sim = FLASH_OSIRIS_1D(start_point=[x0, y0], distance=distance, theta=theta,
+                              extension=extension, **common)
         plot = lambda: sim.plot1D(build_plot_fields(sim.species_names))
     else:
         for name in ("xmin", "xmax", "ymin", "ymax"):
@@ -1375,6 +1413,8 @@ def parse_args(argv=None):
     # --- geometry: 1D lineout (cm) OR 2D box (c/omega_pe) ---
     p.add_argument('--start_point', type=float, nargs=3, help="[1D] lineout start (x y z) [cm]")
     p.add_argument('--end_point', type=float, nargs=3, help="[1D] lineout end (x y z) [cm]")
+    p.add_argument('--extension', type=float, default=0.0,
+                   help="[1D] extra distance beyond end_point; fields held constant at the endpoint [cm]")
     p.add_argument('--xmin', type=float, help="[2D] box xmin [c/omega_pe]")
     p.add_argument('--xmax', type=float, help="[2D] box xmax [c/omega_pe]")
     p.add_argument('--ymin', type=float, help="[2D] box ymin [c/omega_pe]")

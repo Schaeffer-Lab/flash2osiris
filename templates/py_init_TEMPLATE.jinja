@@ -23,7 +23,9 @@ dims = {{ dims }}
 {% if dims == 1 %}
 theta  = {{ theta }}            # lineout angle in the FLASH x-y plane [rad]
 origin = {{ start_point }}      # FLASH (x, y) [c/wpe] at lineout arc-length 0
-distance = {{ distance }}       # lineout length [c/wpe]
+distance = {{ distance }}       # TOTAL OSIRIS domain length [c/wpe] (FLASH lineout + extension)
+flash_distance = {{ flash_distance }}  # arc-length where the FLASH data ends; beyond this the
+                                       # fields are held constant at the endpoint (buffer region)
 {% else %}
 theta  = 0.0                    # 2D box is axis-aligned with the FLASH x-y plane
 origin = [0.0, 0.0]
@@ -55,7 +57,15 @@ def _interp(name):
 
 
 def _flash_xy(xi1, xi2):
-    """OSIRIS sim coords (xi1, xi2) -> FLASH (x, y): origin + R(theta).(xi1, xi2)."""
+    """OSIRIS sim coords (xi1, xi2) -> FLASH (x, y): origin + R(theta).(xi1, xi2).
+
+    In 1D the arc-length xi1 is clamped to [0, flash_distance], so anything in the
+    extension buffer (xi1 > flash_distance) maps to the FLASH endpoint -- constant
+    extrapolation. Every field/particle path routes through here, so the clamp covers
+    fields, thermal/fluid velocities, and densities at once. (2D xi1 is an x-coordinate,
+    not an arc-length, so it is left untouched.)"""
+    if dims == 1:
+        xi1 = np.clip(xi1, 0.0, flash_distance)
     return (origin[0] + _C * xi1 - _S * xi2,
             origin[1] + _S * xi1 + _C * xi2)
 

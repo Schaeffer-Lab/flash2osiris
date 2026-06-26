@@ -30,9 +30,13 @@ species_names: {cham: al, targ: si}
 charge_states: {al: 13, si: 14}
 
 # 1D lineout endpoints in cm (x y z of the z-midplane).
+# `extension` (cm, optional, default 0) appends a buffer beyond end_point whose fields are
+# held constant at the endpoint value; it grows the OSIRIS domain (nx, particle/GPU counts)
+# but adds no new physics. Must keep end_point strictly inside the FLASH domain.
 geometry:
   start_point: [0, 0.07, 0]
   end_point: [0, 0.70, 0]
+  extension: 0.0
 
 solver:
   vpml_bnd_size: 100
