@@ -130,15 +130,19 @@ def load_for_osiris(filename: str, rqm_factor: float = 1, species_names=None):
     (``ds.osiris_species_materials`` / ``ds.osiris_dominant_index``) so the generator
     and this plugin can never disagree about which population is which.
     """
-    # FLASH writes the magnetic field in this setup *directly in Gauss*, but yt's FLASH
-    # frontend assumes the standard USM convention (B_code = B_Gauss / sqrt(4π), giving
-    # magnetic pressure B²/2). It therefore sets ds.magnetic_unit = sqrt(4π) G, so every
-    # ``.to("G")`` multiplies the raw code value by sqrt(4π) ≈ 3.545 — a spurious factor
-    # that put the upstream field at ~25 T instead of the true ~7 T (channel ~5 T).
-    # Overriding the magnetic unit to 1 G makes ``1 code_magnetic == 1 G`` (raw code value
-    # taken as Gauss), fixing every ``.to("G")`` and every B-derived field (Ex/Ey/Ez,
-    # Jx/Jy/Jz) at the source — including the B written into the OSIRIS deck.
-    ds = load(filename, units_override={"magnetic_unit": (1.0, "G")})
+    # This FLASH setup runs with the ``unitsystem = "none"`` runtime parameter, i.e. the
+    # rationalized MHD convention in which the magnetic pressure is B_code²/2 (the 4π is
+    # absorbed into the field variable). The PHYSICAL Gaussian field, whose
+    # v_A = B/sqrt(4π ρ) reproduces the Alfvén speed FLASH actually evolved, is therefore
+    # B_Gauss = sqrt(4π)·B_code. yt's FLASH frontend knows this: for unitsystem="none" it
+    # sets ds.magnetic_unit = sqrt(4π) G, so ``.to("G")`` recovers physical Gauss
+    # correctly. Do NOT override magnetic_unit — an earlier override to 1 G stripped the
+    # sqrt(4π) and made every B-derived quantity (v_A, M_A, β, and the B written into the
+    # OSIRIS deck) wrong by that factor. Verified three ways: the frontend code, the
+    # ``unitsystem='none'`` parameter, and the measured perpendicular-shock compression
+    # (r matches RH only with the physical, sqrt(4π)-larger field). See the MagShockZ
+    # CLAUDE.md "FLASH magnetic field (unitsystem=none)" section.
+    ds = load(filename)
 
     c = units.speed_of_light_cgs
     e = units.electron_charge_cgs
