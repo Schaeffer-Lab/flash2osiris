@@ -834,7 +834,16 @@ class FLASH_OSIRIS_Base:
         ax1.plot(dist, flash_y, color='k', lw=2, label=flash_label)
         ax1.plot(dist, osiris_y, color='r', lw=2, ls='--', label=osiris_label)
         if logy:
-            ax1.set_yscale('log')
+            # symlog (not log): these profiles span ~5 decades and hit ~0 in the far
+            # upstream / between features, where pure log would silently drop points.
+            # linthresh is a robust low percentile of the nonzero |values|, so the
+            # physically-interesting O(1-10) region expands while the near-zero
+            # baseline stays visible (degrades to ~log when there are no zeros).
+            both = np.concatenate([np.asarray(flash_y, float).ravel(),
+                                   np.asarray(osiris_y, float).ravel()])
+            pos = np.abs(both[np.isfinite(both) & (both != 0)])
+            linthresh = float(np.percentile(pos, 10)) if pos.size else 1e-12
+            ax1.set_yscale('symlog', linthresh=linthresh)
         ax1.set_ylabel(ylabel)
         ax1.set_title(title)
         ax1.legend()
@@ -922,9 +931,9 @@ class FLASH_OSIRIS_Base:
         # key -> (ylabel, title, FLASH label, OSIRIS label, log)
         specs = [
             ('pressure_ratio', r'$P_e/P_i$', 'Electron/ion pressure ratio at t=0',
-             r'FLASH  $n_e T_e/(n_i T_i)$', r'OSIRIS  $P_e/P_i$', False),
+             r'FLASH  $n_e T_e/(n_i T_i)$', r'OSIRIS  $P_e/P_i$', True),
             ('mach_alfven', r'$M_A$', 'Alfvenic Mach number at t=0',
-             r'FLASH  $|v|/v_A$', r'OSIRIS  $|v|/\sqrt{\sigma}$', False),
+             r'FLASH  $|v|/v_A$', r'OSIRIS  $|v|/\sqrt{\sigma}$', True),
             ('beta_e', r'$\beta_e$', 'Electron beta at t=0',
              r'FLASH  $n_e k_B T_e/(B^2/8\pi)$', r'OSIRIS  $n_e T_e/(B^2/2)$', True),
             ('beta_i', r'$\beta_i$', 'Ion beta at t=0',
