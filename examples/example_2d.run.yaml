@@ -1,5 +1,5 @@
 # Python-init 2D OSIRIS run spec.
-#   python FLASH_OSIRIS_define.py --config ../runs/perlmutter_2d.run.yaml
+#   python -m flash_osiris.generator --config examples/example_2d.run.yaml
 #
 # Differences from the 1D spec:
 #   * geometry is a BOX in c/omega_pe (xmin/xmax/ymin/ymax), not a lineout.
@@ -28,7 +28,7 @@ n_dump_total: 512
 restart: false
 
 # Populations auto-detected from FLASH materials; rename to the historical al/si
-# (cham=Al chamber, targ=Si target). See perlmutter_1d.run.yaml for details.
+# (cham=Al chamber, targ=Si target). See example_1d.run.yaml for details.
 species_names: {cham: al, targ: si}
 charge_states: {al: 13, si: 14}   # analysis-only metadata (unused by the generator)
 

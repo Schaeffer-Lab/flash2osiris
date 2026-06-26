@@ -28,8 +28,8 @@ flash2osiris/
 │   ├── osiris_deck_TEMPLATE.jinja   # OSIRIS input deck (species-generic)
 │   └── py_init_TEMPLATE.jinja       # OSIRIS python-init script (species-generic)
 ├── examples/
-│   ├── perlmutter_1d.run.yaml               # 1D lineout (Al chamber / Si target)
-│   ├── perlmutter_2d.run.yaml               # 2D box (Al chamber / Si target)
+│   ├── example_1d.run.yaml                  # 1D lineout (Al chamber / Si target)
+│   ├── example_2d.run.yaml                  # 2D box (Al chamber / Si target)
 │   └── example_magshock2019_ch.run.yaml     # CH piston/background, to show plug-and-play
 ├── tests/test_species.py   # unit tests for the population (material) logic
 ├── environment.yml         # conda env (yt, jinja2, plasmapy, ...)
@@ -53,8 +53,8 @@ conda activate flash2osiris
 
 ```bash
 conda activate flash2osiris
-python -m flash_osiris.generator --config examples/perlmutter_1d.run.yaml
-# or:  ./runme.sh examples/perlmutter_1d.run.yaml
+python -m flash_osiris.generator --config examples/example_1d.run.yaml
+# or:  ./runme.sh examples/example_1d.run.yaml
 ```
 
 Outputs are written under `./input_files/<inputfile_name>.<dim>d/`:

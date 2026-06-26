@@ -4,7 +4,7 @@
 # Run from the repo root; outputs land in ./input_files/<inputfile_name>/.
 set -euo pipefail
 
-CONFIG="${1:-examples/perlmutter_1d.run.yaml}"
+CONFIG="${1:-examples/example_1d.run.yaml}"
 
 # conda activate flash2osiris   # uncomment once the env is created (see environment.yml)
 

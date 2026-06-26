@@ -1,7 +1,7 @@
 # Python-init 1D OSIRIS run spec -- first point of the parameter scan.
 # This file is the single source of truth for the run. Generate with:
 #   conda activate osiris2
-#   python FLASH_OSIRIS_define.py --config ../runs/perlmutter_1d.run.yaml
+#   python -m flash_osiris.generator --config examples/example_1d.run.yaml
 # Every value is explicit (no hidden defaults); CLI flags override individual keys.
 # Analysis reads the frozen copy written to <run_dir>/run.yaml.
 
