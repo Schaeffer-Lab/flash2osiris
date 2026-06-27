@@ -27,21 +27,40 @@ node_conf
     {% endif %}
     {% if algorithm in ["cuda", "tiles"] %}
     {% if dims ==1 %}tile_number(1:1) = {{ tile_numbers[0] }},{% else %}
-    tile_number(1:{{ dims }}) = {{ tile_numbers|join(', ') }},{% endif %} {% endif %}
+    tile_number(1:{{ dims }}) = {{ tile_numbers|join(', ') }},{% endif %}
+    ! chunk pool sized with headroom so dynamic load balancing can shift load
+    ! onto a rank without exhausting its pool; increase for larger per-rank counts
+    chunk_size = {{ chunk_size | default(512) }},
+    chunk_pool_size = {{ chunk_pool_size | default(200000) }},
+    nchunks_pad = {{ nchunks_pad | default(8) }},
+    {% endif %}
 }
 
 !----------spatial grid----------
 grid
 {
-    {% if dims == 1 %}nx_p(1:1) = {{ nx }},{% else %}
+    {% if dims == 1 %}nx_p(1:1) = {{ nx }},
+    ! ---- dynamic load balancing ----
+    load_balance(1:1) = .true.,
+    lb_type = "dynamic",
+    n_dynamic = {{ n_dynamic | default(50) }}, ! rebalance-check cadence (skips are cheap)
+    cell_weight = 1.0,
+    ! Use the default (balanced) start: the partition is initialized to the
+    ! density profile, so ranks are never empty. Do NOT set start_load_balance /
+    ! balance_on_start -- those start from a uniform partition and force a large
+    ! reshape that fills previously-empty ranks.
+    !ndump_global_load = 1,{% else %}
     nx_p(1:2) = {{ nx }}, {{ ny }},
-    !load_balance(1:2) = .true., .true.,
-    !lb_type = "dynamic",
-    !n_dynamic = 1024, ! estimate this to be once per crossing time
-    !cell_weight = 1.0,
-    !ndump_global_load = 1,
-    !start_load_balance = 100,
-    !balance_on_start = .false.,{% endif %}
+    ! ---- dynamic load balancing ----
+    load_balance(1:2) = .true., .true.,
+    lb_type = "dynamic",
+    n_dynamic = {{ n_dynamic | default(50) }}, ! rebalance-check cadence (skips are cheap)
+    cell_weight = 1.0,
+    ! Use the default (balanced) start: the partition is initialized to the
+    ! density profile, so ranks are never empty. Do NOT set start_load_balance /
+    ! balance_on_start -- those start from a uniform partition and force a large
+    ! reshape that fills previously-empty ranks.
+    !ndump_global_load = 1,{% endif %}
 }
 
 !----------time step and global data dump timestep number----------
