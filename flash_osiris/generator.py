@@ -36,6 +36,7 @@ class FLASH_OSIRIS_Base:
                  algorithm: str,
                  deck_options: Dict,
                  species_names: Dict[str, str] = None,  # optional {flash_material: osiris_name} rename
+                 charge_states: Dict[str, int] = None,  # {osiris_name: Z}; q_real source for collisions
                  theta: float = None,        # 1D only (set by FLASH_OSIRIS_1D)
                  distance: float = None,     # 1D only (set by FLASH_OSIRIS_1D)
                  extension: float = 0.0,     # 1D only: buffer length [c/wpe] beyond the FLASH endpoint
@@ -58,6 +59,9 @@ class FLASH_OSIRIS_Base:
         # osiris_name} rename. self.species_names (the OSIRIS species names) is filled in
         # from the plugin once the dump is loaded, below.
         self._species_names_override = species_names
+        # Real ion charge states {osiris_name: Z}; used only for collisions (q_real).
+        # The generator still derives rqm/mass from FLASH and never uses Z otherwise.
+        self.charge_states = charge_states or {}
         # species_rqms is derived from FLASH (density-weighted mean 1836/ye over each
         # population's dominant-material cells, restricted to the OSIRIS domain) once the
         # covering grid + coords exist.
@@ -75,7 +79,12 @@ class FLASH_OSIRIS_Base:
         # are held constant at the endpoint value (see _lineout_points and the py-script clamp).
         self.flash_distance = distance
         self.extension = extension
-        self.distance = (distance + extension) if distance is not None else None
+        # Round the total OSIRIS domain length to a whole c/wpe so the deck/py-script
+        # write clean integer xmax/distance (no long trailing decimals) and -- since the
+        # runs use dx=0.1 -- nx = distance/dx stays exact. flash_distance is left exact
+        # (it is the physical FLASH arc length the field clamp keys off); the <1 c/wpe of
+        # rounding just lands in the constant-field extension buffer.
+        self.distance = round(distance + extension) if distance is not None else None
         self.normalizations_override = normalizations_override
 
         # Outputs (deck, py-script, interp slices, figures, run.yaml) are written under
@@ -414,6 +423,11 @@ class FLASH_OSIRIS_Base:
             'dims': self.osiris_dims,
             'inputfile_name': self.inputfile_name,
             'algorithm': self.algorithm,
+            # Reference density [cm^-3] -> nl_simulation n0. Harmless without collisions
+            # (it just pins the normalization explicitly), but REQUIRED by the collision
+            # module, which reads sim_options%n0 and aborts if it is <= 0.
+            'reference_density': np.format_float_scientific(self.n0.value, 4),
+            'collisions': self._collision_context(),
             'nx': nx,
             'ny': ny,
             'xmin': xmin,
@@ -519,22 +533,65 @@ class FLASH_OSIRIS_Base:
         logger.info(f"Calculated tile numbers: n_tiles_x = {n_tiles_x}, n_tiles_y = {n_tiles_y}")
         return n_tiles_x, n_tiles_y
     
+    def _collision_context(self):
+        """Resolve the optional ``collisions`` run.yaml block into template context.
+
+        Off by default: a missing or ``enabled: false`` block returns
+        ``{'enabled': False}`` and leaves the deck byte-for-byte unchanged. When
+        enabled, OSIRIS computes the physical collision rate itself from the plasma
+        state and the global ``n0`` -- the user does NOT set a collision frequency,
+        only the cadence ``n_collide`` and (optionally) a fixed Coulomb logarithm.
+
+        ``species``/``like_collide`` are OSIRIS species names (e, al, si, ...); the
+        per-species ``q_real`` (Z) is sourced from the run spec's ``charge_states``
+        (see :meth:`_get_species_config`)."""
+        coll = dict(self.deck.get('collisions') or {})
+        if not coll.get('enabled', False):
+            return {'enabled': False}
+
+        # Default to colliding every species if the user does not restrict the set.
+        species = coll.get('species') or (['e'] + list(self.species_rqms.keys()))
+        cl = coll.get('coulomb_log', 'auto')
+        automatic = isinstance(cl, str) and cl.lower() == 'auto'
+
+        # Reduced-mass caveat: OSIRIS builds m_real = q_real * rqm from the DECK rqm,
+        # which is reduced by rqm_factor, and the collision rate ~ (q_a q_b / mu)^2.
+        # So an auto Coulomb log at rqm_factor != 1 gives distorted ion collisionality;
+        # the calibrated path is an explicit coulomb_log value (see CLAUDE.md).
+        if automatic and self.rqm_factor != 1:
+            logger.warning(
+                f"collisions enabled with rqm_factor={self.rqm_factor} and "
+                f"coulomb_log=auto: ion collision rates are distorted by the reduced "
+                f"mass (rate ~ 1/mu^2). Set an explicit coulomb_log to calibrate.")
+
+        return {
+            'enabled': True,
+            'n_collide': int(coll.get('n_collide', 1)),
+            'nx_collision_cells': int(coll.get('nx_collision_cells', 1)),
+            'model': str(coll.get('model', 'perez')),
+            'coulomb_logarithm_automatic': automatic,
+            'coulomb_logarithm_value': 0.0 if automatic else float(cl),
+            'species': list(species),
+            'like_collide': list(coll.get('like_collide') or []),
+        }
+
     def _prepare_species_list(self, thermal_bounds):
         """Prepare species data for template rendering."""
         species_list = []
-        
+        coll = self._collision_context()
+
         # Add electrons
-        electron_config = self._get_species_config('e', thermal_bounds['electron'], is_electron=True)
+        electron_config = self._get_species_config('e', thermal_bounds['electron'], coll, is_electron=True)
         species_list.append(electron_config)
-        
+
         # Add ions
         for ion, bounds in thermal_bounds['ions'].items():
-            ion_config = self._get_species_config(ion, bounds, is_electron=False)
+            ion_config = self._get_species_config(ion, bounds, coll, is_electron=False)
             species_list.append(ion_config)
-        
+
         return species_list
-    
-    def _get_species_config(self, species_name, thermal_bounds, is_electron=False):
+
+    def _get_species_config(self, species_name, thermal_bounds, coll, is_electron=False):
         """Get configuration dictionary for a single species."""
         # Phase-space momentum bounds come from the deck options (e_ps_*/i_ps_*),
         # rendered at the template's diag_species level -- not per species here.
@@ -542,7 +599,23 @@ class FLASH_OSIRIS_Base:
             'name': species_name,
             'rqm': -1.0 if is_electron else int(self.species_rqms[species_name] / self.rqm_factor),
         }
-        
+
+        # Collision keys (only when enabled): q_real (Z) is required by OSIRIS for any
+        # colliding species. Electrons are Z=1; ions read Z from the run spec's
+        # charge_states. OSIRIS signs q_real by rqm, so magnitudes are fine here.
+        if coll['enabled']:
+            if is_electron:
+                z = 1
+            else:
+                z = self.charge_states.get(species_name)
+                if z is None:
+                    raise ValueError(
+                        f"collisions enabled but no charge state (Z) for ion "
+                        f"'{species_name}'; add it to charge_states in run.yaml")
+            config['q_real'] = int(z)
+            config['if_collide'] = species_name in coll['species']
+            config['if_like_collide'] = species_name in coll['like_collide']
+
         # Thermal velocity bounds (dimension-dependent)
         if self.osiris_dims == 1:
             vth_start, vth_end = thermal_bounds
@@ -553,7 +626,7 @@ class FLASH_OSIRIS_Base:
             # used by the deck (spe_bound uth_bnd(...,2)).
             config['vth_y_start'] = np.format_float_scientific(thermal_bounds['y'][0], 4)
             config['vth_y_end'] = np.format_float_scientific(thermal_bounds['y'][1], 4)
-        
+
         return config
 
     def _read_thermal_bounds(self) -> Dict:
@@ -1178,8 +1251,9 @@ def _str2bool(v):
 
 # Top-level run.yaml keys that are dict-valued and must survive into the argparse
 # namespace WHOLE (not flattened): species_names is the optional {flash_material:
-# osiris_name} population rename; charge_states is analysis-only metadata.
-_METADATA_KEYS = {"charge_states", "species_names"}
+# osiris_name} population rename; charge_states is analysis metadata (and the q_real
+# source for collisions); collisions is the optional Monte Carlo collisions block.
+_METADATA_KEYS = {"charge_states", "species_names", "collisions"}
 
 
 def load_run_config(path):
@@ -1231,6 +1305,9 @@ def build_run_spec(args):
     charge_states = getattr(args, "charge_states", None)
     if charge_states is not None:
         spec["charge_states"] = charge_states
+    collisions = getattr(args, "collisions", None)
+    if collisions is not None:
+        spec["collisions"] = collisions
     if args.dim == 1:
         spec["geometry"] = {"start_point": args.start_point, "end_point": args.end_point,
                             "extension": getattr(args, "extension", 0.0)}
@@ -1288,9 +1365,21 @@ def main(args):
     # Per-population rqm/mass are derived from FLASH (1836/ye, 1836/sumy) inside the class.
     species_names = getattr(args, "species_names", None)
     logger.info(f"Population rename (species_names): {species_names}")
+    charge_states = getattr(args, "charge_states", None)
+
+    # Collisions are an optional run.yaml block (config-only, dict-valued). They run
+    # only in the standard CPU solver -- the GPU (cuda) and tiles modes do not
+    # implement Monte Carlo collisions -- so fail fast rather than silently dropping.
+    collisions = getattr(args, "collisions", None) or {}
+    if collisions.get("enabled", False):
+        assert args.algorithm == "cpu", (
+            f"collisions are only supported with algorithm='cpu' (the standard solver); "
+            f"got algorithm='{args.algorithm}'. The cuda/tiles modes do not implement "
+            f"Monte Carlo collisions.")
 
     # All deck options come from the CLI -- nothing is defaulted here.
     deck_options = {
+        "collisions": collisions,
         "node_number": args.node_number,
         "num_threads": args.num_threads,
         "n_dump_total": args.n_dump_total,
@@ -1328,6 +1417,7 @@ def main(args):
         algorithm=args.algorithm,
         deck_options=deck_options,
         species_names=species_names,
+        charge_states=charge_states,
     )
 
     if args.dim == 1:

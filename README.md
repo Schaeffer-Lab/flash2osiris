@@ -119,9 +119,45 @@ generator can never disagree about which population is which.
 
 > Charge state `Z` is **not** passed to OSIRIS explicitly: ions are loaded
 > charge-equivalently (density = `n_e`, `q = +1`) with mass-per-charge `rqm = 1836/ye =
-> m_i/(Z m_e)`, and `Z` folds in implicitly through the FLASH `ye`/`sumy` fields. An
-> optional `charge_states` map in the run.yaml is **analysis-only metadata** (the
-> generator never reads it) — carry it if downstream analysis needs `Z`.
+> m_i/(Z m_e)`, and `Z` folds in implicitly through the FLASH `ye`/`sumy` fields. The
+> optional `charge_states` map in the run.yaml is analysis metadata for the
+> collisionless deck (the generator otherwise never reads it) — **except** that with
+> collisions enabled it also supplies each ion's `q_real` (see below).
+
+---
+
+## Collisions (optional, CPU-only)
+
+OSIRIS Monte Carlo (binary) collisions run **only in the standard CPU solver** — the
+`cuda` and `tiles` modes do not implement them. Add an optional `collisions:` block to
+the run.yaml and set `algorithm: cpu` (the generator asserts this):
+
+```yaml
+algorithm: cpu
+charge_states: {al: 13, si: 14}   # also supplies each ion's q_real (Z); electrons = 1
+collisions:
+  enabled: true
+  n_collide: 1                    # cadence: collide every n_collide steps
+  model: perez                    # perez (default) | sentoku | takizuka | isotropic
+  nx_collision_cells: 1           # cells grouped per collision cell (per dim)
+  coulomb_log: 10.0               # "auto" for physical ln(Lambda), or a fixed value
+  species: [e, al, si]            # species that collide
+  like_collide: [e, al, si]       # subset that also self-collides
+```
+
+When enabled the generator (1) emits `n0 = reference_density` in `nl_simulation` (the
+collision module reads `n0` and aborts if it is unset), (2) adds `q_real`/`if_collide`/
+`if_like_collide` to each species, sourcing `q_real` from `charge_states`, and (3)
+appends the `collisions` namelist. You do **not** specify a collision frequency — OSIRIS
+computes the physical rate from the plasma state and `n0`; `n_collide` is only the
+cadence.
+
+**Reduced-mass caveat:** OSIRIS builds `m_real = q_real * rqm` from the *deck* `rqm`
+(reduced by `rqm_factor`), and the collision rate scales as `(q_a q_b / mu)^2`. So at
+`rqm_factor != 1` the ion collisionality is distorted by ~`rqm_factor^2`; `coulomb_log`
+is the single scalar knob to recalibrate the overall rate (the generator warns when
+`coulomb_log: auto` is used with `rqm_factor != 1`). For a faithful collisional run
+prefer `rqm_factor: 1`.
 
 ---
 

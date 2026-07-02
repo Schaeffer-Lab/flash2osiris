@@ -9,7 +9,10 @@
 !----------global simulation parameters----------
 simulation
 {
-    parallel_io = "mpi",
+    parallel_io = "mpi",{% if collisions.enabled %}
+    ! Reference density [cm^-3] pins the normalization (omega_p0 = 56414.6*sqrt(n0)).
+    ! Required for collisions: the collision module reads n0 and aborts if it is unset.
+    n0 = {{ reference_density }},{% endif %}
     {% if algorithm in ["cuda", "tiles"] %}algorithm = "{{ algorithm }}",{% endif %}
 }
 
@@ -151,7 +154,11 @@ particles
 species
 {
     name = "{{ species['name'] }}",
-    rqm = {{ species['rqm'] }},
+    rqm = {{ species['rqm'] }},{% if collisions.enabled %}
+    ! collisions: q_real is the real charge state Z (OSIRIS signs it by rqm).
+    q_real = {{ species['q_real'] }},
+    if_collide = .{{ 'true' if species['if_collide'] else 'false' }}.,
+    if_like_collide = .{{ 'true' if species['if_like_collide'] else 'false' }}.,{% endif %}
     {% if dims == 1 %}
     num_par_x = {{ ppc }},
     {% else %}
@@ -214,7 +221,7 @@ diag_species
     n_ave(1:{{ dims }}) = {{ n_ave }}{% if dims == 2 %}, {{ n_ave }}{% endif %},
     reports = {% for r in reports %}"{{ r }}, savg", {% endfor %}
 
-    rep_udist = {% for u in rep_udist %}"{{ u }}", {% endfor %}
+    rep_udist = {% for u in rep_udist %}"{{ u }}, savg", {% endfor %}
 
 
     {% if species['name'] in ['e', 'ele', 'electron'] %}
@@ -244,6 +251,20 @@ diag_species
     {% endif %}
 }
 {% endfor %}
+{%- if collisions.enabled %}
+!---------- binary (Monte Carlo) collisions ----------
+! CPU-only (the cuda/tiles solvers do not implement collisions). OSIRIS computes the
+! physical collision rate from the plasma state + the global n0; n_collide is only the
+! cadence (collide every n_collide steps). Per-species q_real/if_collide are above.
+collisions
+{
+    n_collide = {{ collisions.n_collide }},
+    nx_collision_cells(1:{{ dims }}) = {{ ([collisions.nx_collision_cells] * dims)|join(', ') }},
+    collision_model = "{{ collisions.model }}",
+    coulomb_logarithm_automatic = .{{ 'true' if collisions.coulomb_logarithm_automatic else 'false' }}.,
+    {% if not collisions.coulomb_logarithm_automatic %}coulomb_logarithm_value = {{ collisions.coulomb_logarithm_value }},{% endif %}
+}
+{%- endif %}
 
 !--------Current smoothing----------
 smooth
