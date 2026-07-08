@@ -161,6 +161,37 @@ prefer `rqm_factor: 1`.
 
 ---
 
+## Erasing the MHD shock (optional, post-processing)
+
+A physically suspect MHD shock often forms ahead of the piston. If you want OSIRIS to
+see a clean piston driving into the ambient instead, `flash_osiris.erase_shock` rewrites
+a band of the saved `interp/*.npy` slices **after** a 1D run has been generated (the
+conversion pipeline itself is untouched):
+
+```bash
+# preview only (writes <run_dir>/shock_erase_preview.png so you can iterate):
+python -m flash_osiris.erase_shock --run input_files/<name>.1d --s1 900 --s2 1200
+# commit once the overlay looks right:
+python -m flash_osiris.erase_shock --run input_files/<name>.1d --s1 900 --s2 1200 --write
+```
+
+`--s1`/`--s2` are arc-length positions **along the lineout in `c/ωpe`** (`s1` = piston-side
+edge of the shock, `s2` = clean upstream where values are copied from); `--taper W`
+smooths the `s1` join over `W c/ωpe` (default 5% of the band; `0` = hard replace). Because
+a 1D run only samples the lineout, the erase is a 1D operation in `s` and works for any
+lineout angle `θ`. It reads geometry from the run's own `run_manifest.yaml` + `py-script-1d.py`.
+
+The first run copies `interp/` → `interp_raw/` once; every subsequent run re-derives its
+edit from that pristine backup, so re-running with new bounds never compounds. The preview
+overlays original vs. edited density (place `s1` just outside the piston), **B** (with `B∥`,
+the `∇·B` check — it must stay flat), ion velocity, and **E**. Continuity is handled by:
+copying every field from the same upstream location (keeps `E = -v×B` self-consistent),
+and holding the lineout-parallel `B∥` constant across the band so `∇·B = ∂B∥/∂s ≈ 0`.
+Note that erasing the shock intentionally discards its swept-up mass/momentum/energy — the
+goal is the piston, not a conservative MHD state. 2D runs are not yet supported.
+
+---
+
 ## Required FLASH fields
 
 The plugin (`load_for_osiris`) reads these FLASH fields, so your dump must provide
